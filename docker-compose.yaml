@@ -1,0 +1,22 @@
+services:
+  parakeet-realtime:
+    build:
+      dockerfile: dev.Dockerfile
+      context: .
+    container_name: parakeet-realtime-server-dev
+    volumes:
+      - ./parakeet-realtime-server:/app
+      - /mnt/home/.cache/huggingface/hub:/root/.cache/huggingface/hub
+    ports:
+      - "9090:9000"
+    shm_size: 8g
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
