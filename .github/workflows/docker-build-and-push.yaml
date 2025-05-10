@@ -1,0 +1,36 @@
+name: Build and push Docker image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'parakeet-realtime-server/**'
+      - '.github/workflows/docker-build-and-push.yaml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: Production
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v4
+      -
+        name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      -
+        name: Build and push
+        uses: docker/build-push-action@v2
+        with:
+          push: true
+          context: ./
+          file: Dockerfile
+          tags: ghcr.io/matuszelenak/parakeet-realtime-server:latest
