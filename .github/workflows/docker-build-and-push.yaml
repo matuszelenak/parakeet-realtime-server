@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - 'parakeet-realtime-server/**'
+      - 'Dockerfile'
+      - 'requirements.txt'
       - '.github/workflows/docker-build-and-push.yaml'
 
 jobs:
