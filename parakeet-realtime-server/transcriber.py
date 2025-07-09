@@ -1,22 +1,14 @@
-import logging
-from typing import List, TypeVar, AsyncGenerator, TypedDict
+from typing import List, AsyncGenerator, TypedDict
 
+import logfire
 import numpy as np
 from nemo.collections.asr.models import EncDecRNNTBPEModel
 from nemo.collections.asr.parts.utils import Hypothesis
 
-T = TypeVar("T")
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logging.basicConfig()
-logging.getLogger(__name__).setLevel(logging.ERROR)
+from models import TranscribedSegment
+from settings import settings
 
 SAMPLING_RATE = 16000
-
-
-def split_to_batches(array: List[T], batch_size: int) -> List[List[T]]:
-    return [array[i:i + batch_size] for i in range(0, len(array), batch_size)]
 
 
 async def even_chunks(audio_chunks: AsyncGenerator[np.ndarray, None], chunk_size):
@@ -50,10 +42,8 @@ class Word(TypedDict):
 
 async def continuous_transcriber(
         model: EncDecRNNTBPEModel,
-        audio_chunks: AsyncGenerator[np.ndarray, None],
-        stable_words_for_iterations=4,
-        stable_words_before_advance=3
-) -> AsyncGenerator[dict, None]:
+        audio_chunks: AsyncGenerator[np.ndarray, None]
+) -> AsyncGenerator[TranscribedSegment, None]:
     transcribed_samples = np.array([], dtype=np.float32)
 
     segments: List[List[Word]] = []
@@ -61,27 +51,26 @@ async def continuous_transcriber(
     stable_segment_counter = 0
     current_ts_offset = 0.0
     transcribed_chain: List[Word] = []
-    sample_offset = 0
 
     last_confirmed_word = ''
     async for chunk in even_chunks(audio_chunks, 4000):
         if chunk is None:
-            yield {
-                'complete': True,
-                'words': [w['word'] for w in transcribed_chain],
-                'start': current_ts_offset,
-                'id': stable_segment_counter,
-                'samples': transcribed_samples.shape[0],
-                'final': True
-            }
+            yield TranscribedSegment(
+                complete=True,
+                words=[w['word'] for w in transcribed_chain],
+                start=current_ts_offset,
+                id=stable_segment_counter,
+                sample_count=transcribed_samples.shape[0],
+                final=True
+            )
 
             return
 
         transcribed_samples = np.concatenate((transcribed_samples, chunk), axis=0)
-        if transcribed_samples.shape[0] < (SAMPLING_RATE / 2):
+        if transcribed_samples.shape[0] / SAMPLING_RATE < settings.MIN_TRANSCRIBED_DURATION:
             continue
 
-        logger.info(f'Processing audio with length {transcribed_samples.shape[0] / SAMPLING_RATE}s')
+        # logfire.info(f'Processing audio with length {transcribed_samples.shape[0] / SAMPLING_RATE}s')
         output: List[Hypothesis] = model.transcribe(transcribed_samples, timestamps=True, verbose=False)
 
         transcribed_chain: List[Word] = output[0].timestamp['word']
@@ -94,49 +83,66 @@ async def continuous_transcriber(
 
         segments.append(transcribed_chain)
 
-        best_segment_index, best_segment_length = -1, -1
-        for ref_s_i, ref_segment_words in enumerate(segments):
-            if len(ref_segment_words) < stable_words_before_advance:
-                continue
+        # for seq_id, seq in enumerate(segments):
+        #     logfire.info(f'{seq_id}: {" ".join([x["word"] for x in seq])}')
+        #
+        # logfire.info('...')
+        best_segment_index, best_segment_length, best_segment_repetitions = -1, -1, -1
+        for reference_segment_i in range(len(segments) - 1, 0, -1):
+            ref_segment = segments[reference_segment_i]
 
-            ref_sequence = ' '.join([w['word'].lower().strip() for w in ref_segment_words])
-            sequence_repetitions = 1
+            if len(ref_segment) < settings.STABLE_WORDS_PER_ITERATION:
+                break
 
-            for com_segment_words in segments[ref_s_i + 1:]:
-                comp_sequence = ' '.join([w['word'].lower().strip() for w in com_segment_words])
+            reference_word_tuple = tuple([x['word'].lower().strip() for x in ref_segment])
 
-                if comp_sequence[:len(ref_sequence)] == ref_sequence:
-                    sequence_repetitions += 1
+            ref_seq_occurrences = 1
+            matching_words = 0
+            for comparison_segment_i in range(reference_segment_i - 1, 0, -1):
+                comparison_segment = segments[comparison_segment_i]
 
-            if sequence_repetitions >= stable_words_for_iterations:
-                if len(ref_segment_words) > best_segment_length:
-                    best_segment_length = len(ref_segment_words)
-                    best_segment_index = ref_s_i
+                if len(comparison_segment) < settings.STABLE_WORDS_PER_ITERATION:
+                    break
+
+                comparison_segment_tuple = tuple([x['word'].lower().strip() for x in comparison_segment])
+
+                i = 0
+                while i < min(len(reference_word_tuple), len(comparison_segment_tuple)) and reference_word_tuple[i] == comparison_segment_tuple[i]:
+                    i += 1
+
+                if i >= settings.STABLE_WORDS_PER_ITERATION:
+                    # logfire.warn(f'{reference_segment_i} == {comparison_segment_i}')
+                    ref_seq_occurrences += 1
+
+                    matching_words = i
+
+            if ref_seq_occurrences >= settings.STABLE_ITERATION_COUNT:
+                best_segment_index = reference_segment_i
+                best_segment_length = matching_words
+                break
 
         if best_segment_index != -1:
-            best_s_words = segments[best_segment_index]
+            best_s_words = segments[best_segment_index][:best_segment_length]
+            logfire.info(f'Commiting! {best_segment_index} {[w["word"] for w in best_s_words]}')
 
-            yield {
-                'complete': True,
-                'words': [w['word'] for w in best_s_words[:-1]],
-                'start': current_ts_offset,
-                'id': stable_segment_counter,
-                'samples': transcribed_samples.shape[0]
-            }
+            yield TranscribedSegment(
+                complete=True,
+                words=[w['word'] for w in best_s_words],
+                start=current_ts_offset,
+                id=stable_segment_counter,
+                sample_count=transcribed_samples.shape[0]
+            )
 
-            last_confirmed_word = best_s_words[:-1][-1]['word'].strip().lower()
-
-            samples_to_advance = int(best_s_words[-2]['end'] * SAMPLING_RATE)
+            samples_to_advance = int(best_s_words[-1]['end'] * SAMPLING_RATE)
             transcribed_samples = transcribed_samples[samples_to_advance:]
-            segments = segments[best_segment_index + 1:]
+            segments = [segments[best_segment_index][best_segment_length:]]
             stable_segment_counter += 1
             current_ts_offset += samples_to_advance / SAMPLING_RATE
-            sample_offset += samples_to_advance
 
         else:
-            yield {
-                'complete': False,
-                'words': [w['word'] for w in transcribed_chain],
-                'samples': transcribed_samples.shape[0],
-                'start': current_ts_offset,
-            }
+            yield TranscribedSegment(
+                complete=False,
+                words=[w['word'] for w in transcribed_chain],
+                sample_count=transcribed_samples.shape[0],
+                start=current_ts_offset
+            )

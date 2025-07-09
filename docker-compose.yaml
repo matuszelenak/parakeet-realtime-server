@@ -8,15 +8,24 @@ services:
       - ./parakeet-realtime-server:/app
       - /mnt/home/.cache/huggingface/hub:/root/.cache/huggingface/hub
     ports:
-      - "9090:9000"
+      - "9090:9090"
+    env_file:
+      - .env
     shm_size: 8g
     ulimits:
       memlock: -1
       stack: 67108864
+    develop:
+      watch:
+        - action: rebuild
+          path: requirements.txt
+        - action: sync
+          path: parakeet-realtime-server
+          target: /app
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['1']
-              capabilities: [gpu]
+              count: all
+              capabilities: [ gpu ]

@@ -1,6 +1,8 @@
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 RUN apt update && apt install -y \
     build-essential \

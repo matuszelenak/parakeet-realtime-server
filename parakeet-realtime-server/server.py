@@ -2,6 +2,7 @@ import base64
 import logging
 from contextlib import asynccontextmanager
 
+import logfire
 import numpy as np
 import starlette
 from fastapi import FastAPI, UploadFile, File
@@ -20,13 +21,16 @@ model: EncDecRNNTBPEModel | None = None
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global model
-
+    logfire.info('Loading model ...')
     model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
+    logfire.info('Server ready')
     yield
 
 
 app = FastAPI(lifespan=lifespan)
-logger = logging.getLogger(__name__)
+
+logfire.configure(send_to_logfire="if-token-present")
+logfire.instrument_fastapi(app)
 
 
 @app.post('/transcribe')
@@ -40,6 +44,8 @@ async def transcribe(audio_file: UploadFile = File(...)):
 async def transcribe_ws(websocket: WebSocket):
     global model
     await websocket.accept()
+
+    logfire.info('Client connected')
 
     async def samples_generator():
         while True:
@@ -57,15 +63,14 @@ async def transcribe_ws(websocket: WebSocket):
     try:
         while True:
             async for segment in continuous_transcriber(model, samples_generator()):
-                if len(segment['words']) > 0:
-                    await websocket.send_json(segment)
+                if len(segment.words) > 0:
+                    await websocket.send_json(segment.model_dump())
 
     except starlette.websockets.WebSocketDisconnect:
-        pass
+        logfire.info('Client disconnected')
 
     except Exception as e:
-        logger.error('Exception occurred', exc_info=True)
-        logger.error(str(e))
+        logfire.error(f'Exception {e}', _exc_info=True)
 
 
 @app.get('/health')
